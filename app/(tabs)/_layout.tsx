@@ -18,5 +18,19 @@ export default function RootLayout() {
 
   if (!ready) return null;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(tabs)" />
+      <Stack.Screen 
+        name="chat/[matchId]" 
+        options={{ 
+          headerShown: true, 
+          headerTitle: "Skill Match", 
+          headerStyle: { backgroundColor: "#071022" },
+          headerTintColor: "#1E5BFF",
+          headerTitleStyle: { fontWeight: '900', color: 'white' }
+        }} 
+      />
+    </Stack>
+  );
 }

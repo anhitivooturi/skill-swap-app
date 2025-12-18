@@ -34,12 +34,23 @@ export async function getUserProfile(uid: string) {
   return snap.data() as UserProfile;
 }
 
+/**
+ * UPDATED: Now fetches users you HAVEN'T swiped on yet.
+ */
 export async function listUsers(excludeUid: string) {
+  // 1. Get all your previous swipes
+  const swipesQ = query(collection(db, "swipes"), where("fromUid", "==", excludeUid));
+  const swipeSnap = await getDocs(swipesQ);
+  const swipedUserIds = new Set(swipeSnap.docs.map(d => d.data().toUid));
+
+  // 2. Get all users
   const q = query(collection(db, "users"));
   const snap = await getDocs(q);
+  
+  // 3. Filter out yourself AND anyone you've already swiped on
   return snap.docs
     .map((d) => d.data() as UserProfile)
-    .filter((u) => u.uid !== excludeUid);
+    .filter((u) => u.uid !== excludeUid && !swipedUserIds.has(u.uid));
 }
 
 export async function writeSwipe(fromUid: string, toUid: string, direction: SwipeDirection) {
@@ -70,20 +81,59 @@ export async function ensureMatchIfMutualLike(a: string, b: string) {
   return id;
 }
 
+
+// Add this to the bottom of lib/firestore.ts
+
 export async function listMatchesForUser(uid: string) {
-  const q = query(collection(db, "matches"), where("users", "array-contains", uid), orderBy("createdAt", "desc"), limit(50));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as MatchDoc) }));
+  try {
+    const q = query(
+      collection(db, "matches"), 
+      where("users", "array-contains", uid)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ 
+      id: d.id, 
+      ...(d.data() as MatchDoc) 
+    }));
+  } catch (error) {
+    console.error("Error listing matches:", error);
+    return [];
+  }
 }
 
 export async function listMessages(matchId: string) {
-  const q = query(collection(db, "matches", matchId, "messages"), orderBy("createdAt", "asc"), limit(200));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as MessageDoc) }));
+  try {
+    const q = query(
+      collection(db, "matches", matchId, "messages"), 
+      orderBy("createdAt", "asc")
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ 
+      id: d.id, 
+      ...(d.data() as MessageDoc) 
+    }));
+  } catch (error) {
+    console.error("Error listing messages:", error);
+    return [];
+  }
 }
 
 export async function sendMessage(matchId: string, fromUid: string, text: string) {
-  const msg: MessageDoc = { fromUid, text, createdAt: serverTimestamp() };
-  await addDoc(collection(db, "matches", matchId, "messages"), msg);
-  await updateDoc(doc(db, "matches", matchId), { lastMessageAt: serverTimestamp(), lastMessageText: text });
+  try {
+    const msg: MessageDoc = { 
+      fromUid, 
+      text, 
+      createdAt: serverTimestamp() 
+    };
+    // 1. Add the message to the sub-collection
+    await addDoc(collection(db, "matches", matchId, "messages"), msg);
+    
+    // 2. Update the parent match document for the chat list view
+    await updateDoc(doc(db, "matches", matchId), { 
+      lastMessageAt: serverTimestamp(), 
+      lastMessageText: text 
+    });
+  } catch (error) {
+    console.error("Error sending message:", error);
+  }
 }

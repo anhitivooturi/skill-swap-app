@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, Pressable, ActivityIndicator, StyleSheet } from "react-native";
+import { View, Text, Pressable, ActivityIndicator, StyleSheet, Platform } from "react-native";
 import Swiper from "react-native-deck-swiper";
 import { auth } from "../../firebase";
 import { ensureMatchIfMutualLike, getUserProfile, listUsers, writeSwipe } from "../../lib/firestore";
 import { UserProfile } from "../../lib/types";
-import { milesBetween } from "../../lib/utils";
 import { router } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
 // Theme Constants
 const BLUE = "#1E5BFF";
@@ -15,11 +15,13 @@ const BORDER = "rgba(255,255,255,0.10)";
 const TEXT = "rgba(255,255,255,0.92)";
 const MUTED = "rgba(255,255,255,0.65)";
 
+// --- HELPERS ---
+
 function toIdSet(arr: any[]) {
   return new Set((arr || []).map((x) => String(x).toLowerCase().trim()).filter(Boolean));
 }
 
-function percentMatch(me: UserProfile, u: UserProfile) {
+function calculateMatchPercentage(me: UserProfile, u: UserProfile) {
   const myOffer = toIdSet(me.skillsOffer);
   const myWant = toIdSet(me.skillsWant);
   const theirOffer = toIdSet(u.skillsOffer);
@@ -34,27 +36,43 @@ function percentMatch(me: UserProfile, u: UserProfile) {
   return Math.max(0, Math.min(100, Math.round(((a + b) / denom) * 100)));
 }
 
-export default function Swipe() {
-  const uid = auth.currentUser?.uid!;
-  const swiperRef = useRef<any>(null);
+function milesBetween(lat1: any, lon1: any, lat2: any, lon2: any) {
+  const nLat1 = Number(lat1); const nLon1 = Number(lon1);
+  const nLat2 = Number(lat2); const nLon2 = Number(lon2);
+  if (!nLat1 || !nLon1 || !nLat2 || !nLon2) return null;
+  
+  const R = 3958.8; // Radius of Earth in miles
+  const dLat = (nLat2 - nLat1) * Math.PI / 180;
+  const dLon = (nLon2 - nLon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(nLat1 * Math.PI / 180) * Math.cos(nLat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
 
+// --- MAIN COMPONENT ---
+
+export default function Swipe() {
   const [me, setMe] = useState<UserProfile | null>(null);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  
-  // State for the Match Celebration Modal
   const [matchData, setMatchData] = useState<{ name: string; matchId: string } | null>(null);
+  
+  const swiperRef = useRef<any>(null);
+  const uid = auth.currentUser?.uid;
 
   useEffect(() => {
     async function loadData() {
+      if (!uid) return;
       try {
+        setLoading(true);
         const mine = await getUserProfile(uid);
         setMe(mine);
+        // listUsers should exclude current user
         const all = await listUsers(uid);
         setUsers(all);
       } catch (err) {
-        console.error("Error loading swipe data:", err);
+        console.error("Load error:", err);
       } finally {
         setLoading(false);
       }
@@ -64,37 +82,38 @@ export default function Swipe() {
 
   const candidates = useMemo(() => {
     if (!me) return [];
-    const r = me.radiusMiles || 25;
+    
+    // Discovery range pulled from Profile state (defaults to 25)
+    const range = me.radiusMiles || 25;
 
     return users
-      .map((u) => {
-        const d = milesBetween(me.lat || 0, me.lng || 0, u.lat || 0, u.lng || 0);
-        const pct = percentMatch(me, u);
-        return { ...u, distanceMiles: d, matchPct: pct };
+      .map((u) => ({
+        ...u,
+        distanceMiles: milesBetween(me.lat, me.lng, u.lat, u.lng),
+        matchPct: calculateMatchPercentage(me, u)
+      }))
+      .filter(u => {
+        // If distance can't be calculated, show them. Otherwise, check against radius.
+        if (u.distanceMiles === null) return true;
+        return u.distanceMiles <= range;
       })
-      .filter((u) => (me.lat && me.lng && u.lat && u.lng ? u.distanceMiles <= r : true))
-      .sort((a, b) => b.matchPct - a.matchPct || a.distanceMiles - b.distanceMiles);
+      // Sort by best skill match first
+      .sort((a, b) => b.matchPct - a.matchPct);
   }, [me, users]);
 
-  const doSwipe = async (index: number, direction: "like" | "pass") => {
-    const current = candidates[index];
-    if (!current || !me) return;
-
-    setBusy(true);
+  const handleSwipe = async (idx: number, dir: "like" | "pass") => {
+    const target = candidates[idx];
+    if (!target || !uid) return;
     try {
-      await writeSwipe(uid, current.uid, direction);
-
-      if (direction === "like") {
-        const matchId = await ensureMatchIfMutualLike(uid, current.uid);
-        if (matchId) {
-          // Trigger the Match Modal UI
-          setMatchData({ name: current.name, matchId: matchId });
+      await writeSwipe(uid, target.uid, dir);
+      if (dir === "like") {
+        const mId = await ensureMatchIfMutualLike(uid, target.uid);
+        if (mId) {
+          setMatchData({ name: target.name, matchId: mId });
         }
       }
     } catch (e) {
-      console.error("Swipe failed:", e);
-    } finally {
-      setBusy(false);
+      console.error("Swipe Action Error:", e);
     }
   };
 
@@ -107,33 +126,21 @@ export default function Swipe() {
     );
   }
 
-  if (!me) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.title}>Profile Incomplete</Text>
-        <Text style={styles.mutedText}>Update your skills and location in the Profile tab.</Text>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
         <View>
           <Text style={styles.headerTitle}>Skill Swap</Text>
-          <Text style={styles.headerSubtitle}>Phoenix, AZ</Text>
+          <Text style={styles.headerSubtitle}>{me?.address || "Nearby"}</Text>
         </View>
         <View style={styles.radiusBadge}>
-          <Text style={styles.radiusText}>{me.radiusMiles || 25} mi</Text>
+          <Text style={styles.radiusText}>{me?.radiusMiles || 25} mi radius</Text>
         </View>
       </View>
 
-      {/* Cards Area */}
       <View style={{ flex: 1 }}>
         {candidates.length > 0 ? (
           <Swiper
-            key={candidates.length}
             ref={swiperRef}
             cards={candidates}
             cardIndex={0}
@@ -142,58 +149,60 @@ export default function Swipe() {
             backgroundColor={"transparent"}
             disableTopSwipe
             disableBottomSwipe
-            onSwipedLeft={(idx) => doSwipe(idx, "pass")}
-            onSwipedRight={(idx) => doSwipe(idx, "like")}
-            renderCard={(u: any) => (
-              <View style={styles.card}>
-                <View style={styles.cardTopRow}>
-                  <Text style={styles.cardName} numberOfLines={1}>{u.name}</Text>
-                  <View style={styles.pctBadge}>
-                    <Text style={styles.pctText}>{u.matchPct}%</Text>
+            onSwipedLeft={(i) => handleSwipe(i, "pass")}
+            onSwipedRight={(i) => handleSwipe(i, "like")}
+            renderCard={(u: any) => {
+              if (!u) return <View style={styles.card} />;
+              return (
+                <View style={styles.card}>
+                  <View style={styles.cardTopRow}>
+                    <Text style={styles.cardName} numberOfLines={1}>{u.name}</Text>
+                    <View style={styles.pctBadge}>
+                      <Text style={styles.pctText}>{u.matchPct}% Match</Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.bioText} numberOfLines={3}>{u.bio || "No bio yet."}</Text>
+                  
+                  <View style={styles.divider} />
+
+                  <Text style={styles.label}>OFFERING</Text>
+                  <Text style={styles.skills} numberOfLines={2}>{u.skillsOffer?.join(" • ") || "None"}</Text>
+
+                  <Text style={[styles.label, { color: "#FFAC1C", marginTop: 15 }]}>WANTING</Text>
+                  <Text style={styles.skills} numberOfLines={2}>{u.skillsWant?.join(" • ") || "None"}</Text>
+
+                  <View style={styles.cardFooter}>
+                      <Text style={styles.distanceText}>📍 {u.distanceMiles?.toFixed(1) || "?"} miles away</Text>
                   </View>
                 </View>
-
-                <Text style={styles.bioText} numberOfLines={3}>{u.bio || "No bio yet."}</Text>
-                
-                <View style={styles.divider} />
-
-                <Text style={styles.label}>OFFERING</Text>
-                <Text style={styles.skills} numberOfLines={2}>{u.skillsOffer?.join(" • ") || "None"}</Text>
-
-                <Text style={[styles.label, { color: "#FFAC1C", marginTop: 15 }]}>WANTING</Text>
-                <Text style={styles.skills} numberOfLines={2}>{u.skillsWant?.join(" • ") || "None"}</Text>
-
-                <View style={styles.cardFooter}>
-                   <Text style={styles.distanceText}>📍 {u.distanceMiles?.toFixed(1)} miles away</Text>
-                </View>
-              </View>
-            )}
+              );
+            }}
           />
         ) : (
           <View style={styles.centered}>
+            <Ionicons name="search" size={48} color={MUTED} style={{ marginBottom: 10 }} />
             <Text style={styles.title}>No more people nearby</Text>
-            <Text style={styles.mutedText}>Try increasing your search radius!</Text>
+            <Text style={styles.mutedText}>Try increasing your search radius in Profile!</Text>
           </View>
         )}
       </View>
 
-      {/* Bottom Buttons */}
       <View style={styles.actionRow}>
-        <Pressable disabled={busy} onPress={() => swiperRef.current?.swipeLeft()} style={styles.passBtn}>
+        <Pressable onPress={() => swiperRef.current?.swipeLeft()} style={styles.passBtn}>
           <Text style={styles.btnText}>Pass</Text>
         </Pressable>
-        <Pressable disabled={busy} onPress={() => swiperRef.current?.swipeRight()} style={styles.likeBtn}>
+        <Pressable onPress={() => swiperRef.current?.swipeRight()} style={styles.likeBtn}>
           <Text style={styles.btnTextWhite}>Swap Skills</Text>
         </Pressable>
       </View>
 
-      {/* Match Modal Overlay */}
       {matchData && (
         <View style={styles.modal}>
           <Text style={styles.modalTitle}>IT'S A{"\n"}MATCH!</Text>
           <View style={styles.modalBody}>
-             <Text style={styles.modalName}>You and {matchData.name}</Text>
-             <Text style={styles.modalSub}>are ready to trade skills!</Text>
+              <Text style={styles.modalName}>You and {matchData.name}</Text>
+              <Text style={styles.modalSub}>are ready to trade skills!</Text>
           </View>
           <Pressable 
             onPress={() => {
@@ -217,7 +226,7 @@ export default function Swipe() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG, padding: 16 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: 40 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12, marginTop: Platform.OS === 'ios' ? 50 : 20 },
   headerTitle: { color: TEXT, fontSize: 28, fontWeight: "900" },
   headerSubtitle: { color: MUTED, fontWeight: "600" },
   radiusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, backgroundColor: "rgba(30,91,255,0.15)", borderWidth: 1, borderColor: BLUE },
@@ -240,7 +249,7 @@ const styles = StyleSheet.create({
   btnTextWhite: { color: "white", fontWeight: "900", fontSize: 16 },
   title: { color: TEXT, fontSize: 22, fontWeight: "900", textAlign: 'center' },
   mutedText: { color: MUTED, marginTop: 8, textAlign: 'center' },
-  modal: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(7, 16, 34, 0.98)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 },
+  modal: { position: 'absolute', inset: 0, backgroundColor: 'rgba(7, 16, 34, 0.98)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 },
   modalTitle: { color: BLUE, fontSize: 48, fontWeight: '900', textAlign: 'center' },
   modalBody: { marginVertical: 40, alignItems: 'center' },
   modalName: { color: TEXT, fontSize: 22, fontWeight: '700' },

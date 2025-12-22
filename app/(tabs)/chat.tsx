@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { View, Text, Pressable, ScrollView, Image } from "react-native";
-import { auth } from "../../firebase";
-import { getUserProfile, listMatchesForUser } from "../../lib/firestore";
+import { useEffect, useState } from "react";
+import { View, Text, Pressable, ScrollView, Image, ActivityIndicator } from "react-native";
+import { auth, db } from "../../firebase";
+import { getUserProfile } from "../../lib/firestore";
+import { collection, query, where, onSnapshot } from "firebase/firestore";
 import { router } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
 const BLUE = "#1E5BFF";
 const BG = "#071022";
@@ -11,131 +13,159 @@ const BORDER = "rgba(255,255,255,0.10)";
 const TEXT = "rgba(255,255,255,0.92)";
 const MUTED = "rgba(255,255,255,0.65)";
 
-function milesBetween(aLat: number, aLng: number, bLat: number, bLng: number) {
-  const R = 3958.7613;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(bLat - aLat);
-  const dLng = toRad(bLng - aLng);
-  const s1 = Math.sin(dLat / 2) ** 2;
-  const s2 = Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
-  const c = 2 * Math.asin(Math.min(1, Math.sqrt(s1 + s2)));
+// Helper for distance calculation using the Haversine formula
+function milesBetween(lat1: any, lon1: any, lat2: any, lon2: any) {
+  // Use Number() to prevent math errors if strings were stored in DB
+  const nLat1 = Number(lat1);
+  const nLon1 = Number(lon1);
+  const nLat2 = Number(lat2);
+  const nLon2 = Number(lon2);
+
+  if (!nLat1 || !nLon1 || !nLat2 || !nLon2) return null;
+
+  const R = 3958.8; // Radius of Earth in miles
+  const dLat = (nLat2 - nLat1) * Math.PI / 180;
+  const dLon = (nLon2 - nLon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(nLat1 * Math.PI / 180) * Math.cos(nLat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
-export default function Chat() {
+export default function ChatList() {
   const uid = auth.currentUser?.uid!;
+  const [loading, setLoading] = useState(true);
   const [matches, setMatches] = useState<any[]>([]);
   const [usersById, setUsersById] = useState<Record<string, any>>({});
   const [me, setMe] = useState<any>(null);
 
+  // 1. Fetch MY profile data
   useEffect(() => {
-    (async () => {
+    async function getMe() {
       const myProfile = await getUserProfile(uid);
-      setMe(myProfile || null);
-
-      const ms = await listMatchesForUser(uid);
-      setMatches(ms);
-
-      const otherIds = Array.from(new Set(ms.map((m) => m.users.find((x: string) => x !== uid)).filter(Boolean)));
-      const entries = await Promise.all(otherIds.map(async (id) => [id, await getUserProfile(id)] as const));
-
-      const map: Record<string, any> = {};
-      for (const [id, p] of entries) map[id] = p;
-      setUsersById(map);
-    })();
+      setMe(myProfile);
+    }
+    getMe();
   }, [uid]);
 
-  const myLat = me?.lat || 0;
-  const myLng = me?.lng || 0;
+  // 2. Real-time listener for Matches
+  useEffect(() => {
+    const q = query(
+      collection(db, "matches"),
+      where("users", "array-contains", uid)
+    );
+
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
+      const ms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      // Get all partner IDs
+      const otherIds = Array.from(new Set(
+        ms.map((m: any) => m.users.find((x: string) => x !== uid)).filter(Boolean)
+      ));
+
+      // Batch fetch missing profiles
+      const newUsersMap = { ...usersById };
+      let updated = false;
+
+      await Promise.all(otherIds.map(async (id: any) => {
+        if (!newUsersMap[id]) {
+          const profile = await getUserProfile(id);
+          if (profile) {
+            newUsersMap[id] = profile;
+            updated = true;
+          }
+        }
+      }));
+
+      if (updated) setUsersById(newUsersMap);
+      setMatches(ms);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [uid]);
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: BG, justifyContent: 'center' }}>
+        <ActivityIndicator color={BLUE} size="large" />
+      </View>
+    );
+  }
 
   return (
     <View style={{ flex: 1, backgroundColor: BG }}>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 10, paddingBottom: 24 }}>
-        <Text style={{ fontSize: 24, fontWeight: "900", color: TEXT }}>Matches</Text>
+      <ScrollView contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 40, paddingTop: 60 }}>
+        <View style={{ marginBottom: 10 }}>
+          <Text style={{ fontSize: 32, fontWeight: "900", color: TEXT }}>Messages</Text>
+          <Text style={{ color: MUTED, fontSize: 14 }}>Connect with your skill partners</Text>
+        </View>
 
-        {matches.length === 0 ? <Text style={{ color: MUTED, fontWeight: "700" }}>No matches yet</Text> : null}
+        {matches.length === 0 ? (
+          <View style={{ marginTop: 100, alignItems: 'center' }}>
+            <Ionicons name="chatbubbles-outline" size={64} color={MUTED} />
+            <Text style={{ color: MUTED, fontWeight: "700", fontSize: 16, marginTop: 16 }}>No matches yet.</Text>
+            <Text style={{ color: MUTED, textAlign: 'center', marginTop: 8 }}>Keep swiping to find local experts!</Text>
+          </View>
+        ) : null}
 
         {matches.map((m) => {
           const otherId = m.users.find((x: string) => x !== uid);
           const other = otherId ? usersById[otherId] : null;
-
-          const otherLat = other?.lat || 0;
-          const otherLng = other?.lng || 0;
-
-          const dist =
-            myLat && myLng && otherLat && otherLng ? milesBetween(myLat, myLng, otherLat, otherLng) : null;
+          
+          // Calculate distance using my lat/lng vs their lat/lng
+          const dist = (me?.lat && other?.lat) 
+            ? milesBetween(me.lat, me.lng, other.lat, other.lng) 
+            : null;
 
           return (
             <Pressable
               key={m.id}
               onPress={() => router.push(`/chat/${m.id}`)}
-              style={{
+              style={({ pressed }) => ({
                 backgroundColor: CARD,
                 borderWidth: 1,
                 borderColor: BORDER,
-                borderRadius: 18,
-                padding: 14,
+                borderRadius: 20,
+                padding: 16,
                 flexDirection: "row",
-                gap: 12,
+                gap: 14,
                 alignItems: "center",
-              }}
+                opacity: pressed ? 0.8 : 1,
+                transform: [{ scale: pressed ? 0.98 : 1 }]
+              })}
             >
-              <View
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 16,
-                  borderWidth: 1,
-                  borderColor: BORDER,
-                  backgroundColor: "rgba(0,0,0,0.18)",
-                  overflow: "hidden",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
+              <View style={{ width: 60, height: 60, borderRadius: 20, backgroundColor: "rgba(30,91,255,0.1)", overflow: "hidden", borderWidth: 1, borderColor: BORDER }}>
                 {other?.photoUrl ? (
                   <Image source={{ uri: other.photoUrl }} style={{ width: "100%", height: "100%" }} />
                 ) : (
-                  <View
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      backgroundColor: "rgba(30,91,255,0.10)",
-                    }}
-                  >
-                    <Text style={{ color: TEXT, fontWeight: "900" }}>
-                      {(other?.name || "U").slice(0, 1).toUpperCase()}
+                  <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+                    <Text style={{ color: BLUE, fontWeight: "900", fontSize: 20 }}>
+                      {(other?.name || "?").slice(0, 1).toUpperCase()}
                     </Text>
                   </View>
                 )}
               </View>
 
               <View style={{ flex: 1, gap: 4 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                  <Text style={{ fontWeight: "900", fontSize: 16, color: TEXT }} numberOfLines={1}>
-                    {other?.name || otherId}
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                  <Text style={{ fontWeight: "900", fontSize: 18, color: TEXT }} numberOfLines={1}>
+                    {other?.name || "Skill Partner"}
                   </Text>
-
-                  <View
-                    style={{
-                      paddingHorizontal: 10,
-                      paddingVertical: 6,
-                      borderRadius: 999,
-                      borderWidth: 1,
-                      borderColor: "rgba(30,91,255,0.55)",
-                      backgroundColor: "rgba(30,91,255,0.12)",
-                    }}
-                  >
-                    <Text style={{ color: TEXT, fontWeight: "800", fontSize: 12 }}>
-                      {dist == null ? "Distance n/a" : `${dist.toFixed(1)} mi`}
+                  {/* Distance rendering fixed here */}
+                  {dist !== null && (
+                    <Text style={{ color: BLUE, fontWeight: "800", fontSize: 12 }}>
+                      {dist.toFixed(1)} mi away
                     </Text>
-                  </View>
+                  )}
                 </View>
 
-                <Text style={{ color: MUTED, fontWeight: "700" }} numberOfLines={1}>
-                  {m.lastMessageText || "Tap to chat"}
+                <Text 
+                  style={{ color: m.lastMessageText ? MUTED : BLUE, fontWeight: m.lastMessageText ? "500" : "800" }} 
+                  numberOfLines={1}
+                >
+                  {m.lastMessageText || "New Match! Say hello 👋"}
                 </Text>
               </View>
             </Pressable>

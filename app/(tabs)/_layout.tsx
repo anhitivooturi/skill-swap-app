@@ -1,36 +1,18 @@
-import { Stack } from "expo-router";
-import { useEffect, useState } from "react";
-import { onAuthStateChanged, signInAnonymously } from "firebase/auth";
-import { auth } from "../../firebase";
+import { Tabs } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
-export default function RootLayout() {
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      if (!u) {
-        await signInAnonymously(auth);
-      }
-      setReady(true);
-    });
-    return () => unsub();
-  }, []);
-
-  if (!ready) return null;
-
+export default function TabLayout() {
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="(tabs)" />
-      <Stack.Screen 
-        name="chat/[matchId]" 
-        options={{ 
-          headerShown: true, 
-          headerTitle: "Skill Match", 
-          headerStyle: { backgroundColor: "#071022" },
-          headerTintColor: "#1E5BFF",
-          headerTitleStyle: { fontWeight: '900', color: 'white' }
-        }} 
-      />
-    </Stack>
+    <Tabs screenOptions={{ 
+      headerShown: false,
+      tabBarStyle: { backgroundColor: "#0D1A36", borderTopColor: "rgba(255,255,255,0.1)", height: 90 },
+      tabBarActiveTintColor: "#1E5BFF",
+      tabBarInactiveTintColor: "rgba(255,255,255,0.5)"
+    }}>
+      <Tabs.Screen name="swipe" options={{ title: "Discover", tabBarIcon: ({ color }) => <Ionicons name="flame" size={24} color={color} /> }} />
+      <Tabs.Screen name="chat" options={{ title: "Matches", tabBarIcon: ({ color }) => <Ionicons name="chatbubbles" size={24} color={color} /> }} />
+      <Tabs.Screen name="profile" options={{ title: "Profile", tabBarIcon: ({ color }) => <Ionicons name="person" size={24} color={color} /> }} />
+      <Tabs.Screen name="index" options={{ href: null }} />
+    </Tabs>
   );
 }
